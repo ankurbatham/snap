@@ -53,7 +53,7 @@ details summary{cursor:pointer;font-weight:600}
 <body>
 <div class="wrap">
   <h1>Snap &amp; Answer — Live</h1>
-  <p class="sub">Start scanning, then point the camera at a question with options. When ChatGPT sees one, it gives the correct answer by itself.</p>
+  <p class="sub">Tap Start scanning once. It checks the camera on a timer (every 15 seconds by default) and speaks the correct option when it sees a question.</p>
 
   <div class="card">
     <details id="settings">
@@ -108,6 +108,8 @@ details summary{cursor:pointer;font-weight:600}
       <input type="range" id="rate" min="0.6" max="1.6" step="0.1" value="1"></div>
     <div><label class="lbl" for="spkMode">What to speak</label>
       <select id="spkMode"><option value="full">Option letter and its text (B, Paris)</option><option value="letter">Option letter only (Option B)</option></select></div>
+    <div><label class="lbl" for="every">Scan every</label>
+      <select id="every"><option value="10">10 seconds</option><option value="15" selected>15 seconds</option><option value="20">20 seconds</option><option value="30">30 seconds</option><option value="60">60 seconds</option></select></div>
     <div class="hint">Each new question sent to ChatGPT costs a small amount on your OpenAI account. Tap “Stop scanning” when you’re done.</div>
   </div>
 
@@ -124,6 +126,7 @@ details summary{cursor:pointer;font-weight:600}
 const $=id=>document.getElementById(id);
 const video=$('video'),preview=$('preview'),ph=$('ph'),chip=$('chip'),small=$('small'),big=$('big');
 const W=48,H=36,MOVE=7,CHANGE=14,COOLDOWN=3000,TICK=700;
+let lastWasAnswer=false,nextAt=0;
 let stream=null,scanning=false,busy=false,timer=null,prevSmall=null,lastSent=null,stable=0,lastSendAt=0,wake=null,lastAnswer='',aborter=null;
 
 const PROMPT="This is a frame from a live camera. If it clearly shows a question with answer options (A, B, C, D or 1, 2, 3, 4), reply with ONLY the correct option: its letter or number and its full text, for example: B) Paris. If more than one option is correct, list every correct option, each on its own line. If it shows a question without options, reply with ONLY the short answer. If there are several questions, put each answer on its own numbered line. If no complete, readable question is visible (blurry, cut off, or no question at all), reply with exactly the single word NONE. Never explain and never add any other words.";
@@ -178,10 +181,10 @@ function handle(text,manual){
   const t=(text||'').trim();
   if(!t||/^none\b/i.test(t)){
     if(manual){$('answer').className='answer empty';$('answer').textContent='No question found in that photo.'}
-    setChip('No question found — keep scanning'); return;
+    lastWasAnswer=false; setChip('No question found — keep scanning'); return;
   }
   lastAnswer=t; $('answer').className='answer'; $('answer').textContent=t; $('err').textContent='';
-  $('actRow').classList.remove('hidden'); addHist(t); setChip('Answered ✓','ok');
+  $('actRow').classList.remove('hidden'); addHist(t); lastWasAnswer=true; setChip('Answered ✓','ok');
   if($('auto').checked) speak(t);
 }
 
@@ -214,19 +217,20 @@ async function analyzeFrame(cur){
   const blob=await frameBlob(); busy=false; await askBlob(blob,false);
 }
 
-/* loop */
+/* loop: one scan every N seconds */
+const getInterval=()=>parseInt($('every').value,10)||15;
 function tick(){
-  if(!scanning||!video.videoWidth) return;
-  const cur=grab(),mv=diff(cur,prevSmall); prevSmall=cur;
-  stable=mv<MOVE?stable+1:0;
-  if(busy) return;
-  if(stable<2){ setChip('Hold steady…'); return; }
-  if(diff(cur,lastSent)<=CHANGE){
-    if(chip.textContent!=='Answered ✓' && chip.textContent!=='No question found — keep scanning') setChip('Watching…');
-    return;
-  }
-  if(Date.now()-lastSendAt<COOLDOWN) return;
-  analyzeFrame(cur);
+  if(!scanning||!video.videoWidth||busy) return;
+  const left=Math.ceil((nextAt-Date.now())/1000);
+  if(left>0){ setChip('Next scan in '+left+'s'); return; }
+  scanOnce();
+}
+async function scanOnce(){
+  nextAt=Date.now()+getInterval()*1000;
+  const cur=grab();
+  if(lastWasAnswer && diff(cur,lastSent)<=CHANGE){ setChip('Same question — skipped'); return; }
+  lastSent=cur; busy=true; setChip('Reading…','busy');
+  const blob=await frameBlob(); busy=false; await askBlob(blob,false);
 }
 async function startScan(){
   unlock(); $('err').textContent=''; $('camHint').textContent='';
@@ -238,7 +242,7 @@ async function startScan(){
   video.srcObject=stream; await video.play().catch(()=>{});
   preview.classList.add('hidden'); video.classList.remove('hidden'); ph.classList.add('hidden');
   $('startBtn').classList.add('hidden'); $('stopBtn').classList.remove('hidden'); $('nowBtn').classList.remove('hidden');
-  prevSmall=null;lastSent=null;stable=0;lastSendAt=0;scanning=true; timer=setInterval(tick,TICK); setChip('Looking…');
+  prevSmall=null;lastSent=null;lastWasAnswer=false;scanning=true; nextAt=Date.now()+1500; timer=setInterval(tick,1000); setChip('Starting…');
   try{ if(navigator.wakeLock) wake=await navigator.wakeLock.request('screen'); }catch(e){}
 }
 function stopScan(){
@@ -250,7 +254,7 @@ function stopScan(){
   setChip(''); if(wake){try{wake.release()}catch(e){} wake=null} busy=false;
 }
 $('startBtn').onclick=startScan; $('stopBtn').onclick=stopScan;
-$('nowBtn').onclick=async()=>{ if(busy||!scanning) return; unlock(); lastSent=grab(); lastSendAt=Date.now(); askBlob(await frameBlob(),true); };
+$('nowBtn').onclick=async()=>{ if(busy||!scanning) return; unlock(); lastSent=grab(); nextAt=Date.now()+getInterval()*1000; askBlob(await frameBlob(),true); };
 document.addEventListener('visibilitychange',()=>{ if(document.hidden&&scanning) stopScan(); });
 
 /* single photo */
