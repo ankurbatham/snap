@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Snap &amp; Answer — Live (ChatGPT)</title>
+<style>
+:root{
+  color-scheme:light dark;
+  --bg:#f6f5f1; --surface:#fff; --text:#1d1c1a; --muted:#6b6963; --border:#e2dfd7;
+  --accent:#0f8a6a; --accent-text:#fff; --soft:#f0ede6; --err:#b3261e;
+}
+@media (prefers-color-scheme: dark){
+  :root{--bg:#161513; --surface:#201f1c; --text:#f1eee8; --muted:#9c978d; --border:#34322d;
+  --accent:#3fcf9f; --accent-text:#08150f; --soft:#2a2824; --err:#f2b8b5}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0)}
+.wrap{max-width:600px;margin:0 auto;padding:16px 16px 40px}
+h1{font-size:22px;margin:4px 0 2px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 14px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:12px;margin-bottom:14px}
+.stage{position:relative;border-radius:12px;overflow:hidden;background:#000;aspect-ratio:3/4;display:flex;align-items:center;justify-content:center}
+.stage video,.stage img{width:100%;height:100%;object-fit:cover;display:block}
+.ph{color:#bdb9b0;text-align:center;padding:24px;font-size:14px}
+.chip{position:absolute;left:10px;bottom:10px;right:10px;background:rgba(0,0,0,.65);color:#fff;font-size:14px;font-weight:600;padding:8px 12px;border-radius:999px;text-align:center}
+.chip.busy{background:rgba(15,138,106,.92)}
+.chip.ok{background:rgba(31,122,77,.92)}
+.row{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+button,.btn{font:inherit;font-weight:600;border-radius:12px;border:1px solid var(--border);background:var(--soft);
+  color:var(--text);padding:12px 14px;cursor:pointer;flex:1;min-width:110px;text-align:center;touch-action:manipulation}
+button.primary{background:var(--accent);color:var(--accent-text);border-color:transparent}
+button:disabled{opacity:.5}
+label.lbl{display:block;font-size:13px;color:var(--muted);margin:2px 0 6px}
+select,input[type=text],input[type=password],input[type=range]{width:100%;font:inherit;color:var(--text);background:var(--soft);
+  border:1px solid var(--border);border-radius:12px;padding:10px 12px}
+.grid{display:grid;gap:12px}
+.hidden{display:none!important}
+.hint{color:var(--muted);font-size:13px;margin-top:8px}
+.err{color:var(--err);font-size:14px;margin-top:8px;white-space:pre-wrap}
+.answer{font-size:26px;line-height:1.3;font-weight:700;white-space:pre-wrap;word-wrap:break-word}
+.answer.empty{font-size:16px;font-weight:400;color:var(--muted)}
+.check{display:flex;align-items:center;gap:8px;font-size:15px}
+.check input{width:20px;height:20px}
+.hist{margin:8px 0 0;padding:0;list-style:none}
+.hist li{padding:8px 0;border-top:1px solid var(--border);white-space:pre-wrap}
+.hist li:first-child{border-top:0}
+.hist small{color:var(--muted);display:block}
+details summary{cursor:pointer;font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Snap &amp; Answer — Live</h1>
+  <p class="sub">Start scanning, then point the camera at a question with options. When ChatGPT sees one, it gives the correct answer by itself.</p>
+
+  <div class="card">
+    <details id="settings">
+      <summary>⚙️ Settings (OpenAI key)</summary>
+      <div class="grid" style="margin-top:12px">
+        <div><label class="lbl">OpenAI API key</label>
+          <input type="password" id="okey" placeholder="sk-..." autocomplete="off"></div>
+        <div><label class="lbl">Model (must support images)</label>
+          <input type="text" id="omodel" value="gpt-4o"></div>
+        <button id="saveBtn" class="primary">Save on this device</button>
+        <div class="hint">Your key is stored only in this browser and sent only to OpenAI.</div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="stage">
+      <video id="video" playsinline muted autoplay class="hidden"></video>
+      <img id="preview" alt="Photo" class="hidden">
+      <div class="ph" id="ph">Camera is off. Tap “Start scanning”.</div>
+      <div class="chip hidden" id="chip"></div>
+    </div>
+    <canvas id="small" width="48" height="36" class="hidden"></canvas>
+    <canvas id="big" class="hidden"></canvas>
+    <div class="row">
+      <button id="startBtn" class="primary">Start scanning</button>
+      <button id="stopBtn" class="hidden">Stop scanning</button>
+      <button id="nowBtn" class="hidden">Scan now</button>
+    </div>
+    <div class="row">
+      <label class="btn" for="fileInput" id="fileLabel">Or take / choose one photo</label>
+      <input type="file" id="fileInput" accept="image/*" capture="environment" class="hidden">
+      <label class="btn" for="shotInput" id="shotLabel">🖼️ Choose a screenshot</label>
+      <input type="file" id="shotInput" accept="image/*" class="hidden">
+    </div>
+    <div class="hint" id="camHint"></div>
+  </div>
+
+  <div class="card">
+    <label class="lbl">Answer</label>
+    <div id="answer" class="answer empty">Waiting for a question…</div>
+    <div class="err" id="err"></div>
+    <div class="row hidden" id="actRow">
+      <button id="listenBtn">🔊 Listen again</button>
+      <button id="copyBtn">Copy</button>
+    </div>
+  </div>
+
+  <div class="card grid">
+    <label class="check"><input type="checkbox" id="auto" checked> Read the answer aloud</label>
+    <div><label class="lbl">Speech speed: <span id="rateVal">1.0</span>×</label>
+      <input type="range" id="rate" min="0.6" max="1.6" step="0.1" value="1"></div>
+    <div><label class="lbl" for="spkMode">What to speak</label>
+      <select id="spkMode"><option value="full">Option letter and its text (B, Paris)</option><option value="letter">Option letter only (Option B)</option></select></div>
+    <div class="hint">Each new question sent to ChatGPT costs a small amount on your OpenAI account. Tap “Stop scanning” when you’re done.</div>
+  </div>
+
+  <div class="card">
+    <details><summary>Earlier answers</summary>
+      <ul class="hist" id="hist"><li><small>Nothing yet.</small></li></ul>
+    </details>
+  </div>
+  <p class="hint">AI can make mistakes — double-check important answers.</p>
+</div>
+
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const video=$('video'),preview=$('preview'),ph=$('ph'),chip=$('chip'),small=$('small'),big=$('big');
+const W=48,H=36,MOVE=7,CHANGE=14,COOLDOWN=3000,TICK=700;
+let stream=null,scanning=false,busy=false,timer=null,prevSmall=null,lastSent=null,stable=0,lastSendAt=0,wake=null,lastAnswer='',aborter=null;
+
+const PROMPT="This is a frame from a live camera. If it clearly shows a question with answer options (A, B, C, D or 1, 2, 3, 4), reply with ONLY the correct option: its letter or number and its full text, for example: B) Paris. If more than one option is correct, list every correct option, each on its own line. If it shows a question without options, reply with ONLY the short answer. If there are several questions, put each answer on its own numbered line. If no complete, readable question is visible (blurry, cut off, or no question at all), reply with exactly the single word NONE. Never explain and never add any other words.";
+
+/* settings */
+const store={get:k=>{try{return localStorage.getItem(k)||''}catch(e){return''}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
+$('okey').value=store.get('okey'); if(store.get('omodel')) $('omodel').value=store.get('omodel');
+if(!store.get('okey')) $('settings').open=true;
+$('saveBtn').onclick=()=>{store.set('okey',$('okey').value.trim());store.set('omodel',$('omodel').value.trim());
+  $('saveBtn').textContent='Saved ✓';setTimeout(()=>$('saveBtn').textContent='Save on this device',1500)};
+
+function setChip(t,k){ if(!t){chip.classList.add('hidden');return} chip.textContent=t; chip.className='chip'+(k?' '+k:''); }
+
+/* speech */
+const synth=window.speechSynthesis;
+const clean=t=>t.replace(/[*_`#>]/g,'').replace(/\$/g,'');
+function forSpeech(t){ if($('spkMode').value!=='letter') return t; return t.split('\n').map(l=>{const m=l.match(/^\s*\(?([A-Za-z]|\d{1,2})[\).:\-]/); return m?'Option '+m[1].toUpperCase():l}).join('. '); }
+function speak(t){ if(!synth||!t)return; synth.cancel(); const u=new SpeechSynthesisUtterance(clean(forSpeech(t))); u.rate=parseFloat($('rate').value)||1; synth.speak(u); }
+function unlock(){ if(synth){const u=new SpeechSynthesisUtterance(' ');u.volume=0;synth.speak(u)} }
+$('rate').oninput=()=>$('rateVal').textContent=parseFloat($('rate').value).toFixed(1);
+$('listenBtn').onclick=()=>speak(lastAnswer);
+if(!synth) $('listenBtn').classList.add('hidden');
+$('copyBtn').onclick=async()=>{try{await navigator.clipboard.writeText(lastAnswer);$('copyBtn').textContent='Copied ✓'}catch(e){$('copyBtn').textContent='Copy failed'} setTimeout(()=>$('copyBtn').textContent='Copy',1500)};
+
+/* frames */
+function grab(){
+  const c=small.getContext('2d',{willReadFrequently:true}); c.drawImage(video,0,0,W,H);
+  const d=c.getImageData(0,0,W,H).data,g=new Uint8Array(W*H);
+  for(let i=0;i<g.length;i++) g[i]=(d[i*4]*0.3+d[i*4+1]*0.59+d[i*4+2]*0.11)|0; return g;
+}
+function diff(a,b){ if(!a||!b) return 999; let s=0; for(let i=0;i<a.length;i++) s+=Math.abs(a[i]-b[i]); return s/a.length; }
+function frameBlob(){
+  const w=video.videoWidth,h=video.videoHeight,s=Math.min(1,1280/Math.max(w,h));
+  big.width=Math.round(w*s);big.height=Math.round(h*s); big.getContext('2d').drawImage(video,0,0,big.width,big.height);
+  return new Promise(r=>big.toBlob(r,'image/jpeg',0.85));
+}
+function blobToB64(b){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(',')[1]);r.onerror=rej;r.readAsDataURL(b)})}
+async function downscale(b){
+  const bmp=await createImageBitmap(b).catch(()=>null); if(!bmp) return b;
+  const s=Math.min(1,1600/Math.max(bmp.width,bmp.height));
+  big.width=Math.round(bmp.width*s);big.height=Math.round(bmp.height*s); big.getContext('2d').drawImage(bmp,0,0,big.width,big.height);
+  return new Promise(r=>big.toBlob(x=>r(x||b),'image/jpeg',0.88));
+}
+
+/* results */
+function addHist(t){
+  const ul=$('hist'); if(ul.children.length===1 && ul.firstChild.textContent==='Nothing yet.') ul.innerHTML='';
+  const li=document.createElement('li'); li.textContent=t; const sm=document.createElement('small'); sm.textContent=new Date().toLocaleTimeString(); li.prepend(sm);
+  ul.prepend(li); while(ul.children.length>8) ul.removeChild(ul.lastChild);
+}
+function handle(text,manual){
+  const t=(text||'').trim();
+  if(!t||/^none\b/i.test(t)){
+    if(manual){$('answer').className='answer empty';$('answer').textContent='No question found in that photo.'}
+    setChip('No question found — keep scanning'); return;
+  }
+  lastAnswer=t; $('answer').className='answer'; $('answer').textContent=t; $('err').textContent='';
+  $('actRow').classList.remove('hidden'); addHist(t); setChip('Answered ✓','ok');
+  if($('auto').checked) speak(t);
+}
+
+/* ChatGPT */
+async function askBlob(blob,manual){
+  const key=$('okey').value.trim();
+  if(!key){ $('settings').open=true; $('err').textContent='Add your OpenAI key in Settings first.'; if(scanning) stopScan(); return; }
+  busy=true; setChip('Reading…','busy');
+  aborter=new AbortController();
+  try{
+    const b64=await blobToB64(blob);
+    const r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',signal:aborter.signal,
+      headers:{'content-type':'application/json','authorization':'Bearer '+key},
+      body:JSON.stringify({model:$('omodel').value.trim()||'gpt-4o',max_tokens:300,messages:[{role:'user',content:[
+        {type:'text',text:PROMPT},{type:'image_url',image_url:{url:'data:image/jpeg;base64,'+b64}}]}]})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){
+      const msg=(j.error&&j.error.message)||('HTTP '+r.status);
+      if(r.status===401||r.status===403||r.status===429){ stopScan(); $('err').textContent=msg; return; }
+      throw new Error(msg);
+    }
+    handle((j.choices&&j.choices[0]&&j.choices[0].message.content)||'',manual);
+  }catch(e){
+    if(e&&e.name==='AbortError') return;
+    $('err').textContent='Request failed: '+(e.message||'unknown error')+(scanning?'\nScanning continues.':'');
+  }finally{ busy=false; aborter=null; if(scanning && chip.textContent==='Reading…') setChip('Watching…'); }
+}
+async function analyzeFrame(cur){
+  busy=true; lastSent=cur; lastSendAt=Date.now(); setChip('Reading…','busy');
+  const blob=await frameBlob(); busy=false; await askBlob(blob,false);
+}
+
+/* loop */
+function tick(){
+  if(!scanning||!video.videoWidth) return;
+  const cur=grab(),mv=diff(cur,prevSmall); prevSmall=cur;
+  stable=mv<MOVE?stable+1:0;
+  if(busy) return;
+  if(stable<2){ setChip('Hold steady…'); return; }
+  if(diff(cur,lastSent)<=CHANGE){
+    if(chip.textContent!=='Answered ✓' && chip.textContent!=='No question found — keep scanning') setChip('Watching…');
+    return;
+  }
+  if(Date.now()-lastSendAt<COOLDOWN) return;
+  analyzeFrame(cur);
+}
+async function startScan(){
+  unlock(); $('err').textContent=''; $('camHint').textContent='';
+  if(!$('okey').value.trim()){ $('settings').open=true; $('err').textContent='Add your OpenAI key in Settings first.'; return; }
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    $('camHint').textContent='Live camera needs HTTPS (or localhost). Use “Or take / choose one photo”.'; return; }
+  try{ stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false}); }
+  catch(e){ $('camHint').textContent='Camera blocked or unavailable. Use “Or take / choose one photo”.'; return; }
+  video.srcObject=stream; await video.play().catch(()=>{});
+  preview.classList.add('hidden'); video.classList.remove('hidden'); ph.classList.add('hidden');
+  $('startBtn').classList.add('hidden'); $('stopBtn').classList.remove('hidden'); $('nowBtn').classList.remove('hidden');
+  prevSmall=null;lastSent=null;stable=0;lastSendAt=0;scanning=true; timer=setInterval(tick,TICK); setChip('Looking…');
+  try{ if(navigator.wakeLock) wake=await navigator.wakeLock.request('screen'); }catch(e){}
+}
+function stopScan(){
+  scanning=false; clearInterval(timer); timer=null; if(aborter) aborter.abort();
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+  video.srcObject=null; video.classList.add('hidden'); ph.classList.remove('hidden');
+  ph.textContent='Scanning stopped. Tap “Start scanning” to continue.';
+  $('startBtn').classList.remove('hidden'); $('stopBtn').classList.add('hidden'); $('nowBtn').classList.add('hidden');
+  setChip(''); if(wake){try{wake.release()}catch(e){} wake=null} busy=false;
+}
+$('startBtn').onclick=startScan; $('stopBtn').onclick=stopScan;
+$('nowBtn').onclick=async()=>{ if(busy||!scanning) return; unlock(); lastSent=grab(); lastSendAt=Date.now(); askBlob(await frameBlob(),true); };
+document.addEventListener('visibilitychange',()=>{ if(document.hidden&&scanning) stopScan(); });
+
+/* single photo */
+$('fileLabel').addEventListener('click',()=>unlock());
+$('shotLabel').addEventListener('click',()=>unlock());
+const onPick=async e=>{
+  const f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f) return;
+  if(scanning) stopScan();
+  const small2=await downscale(f);
+  if(preview.src.startsWith('blob:')) URL.revokeObjectURL(preview.src);
+  preview.src=URL.createObjectURL(small2); preview.classList.remove('hidden'); ph.classList.add('hidden');
+  $('err').textContent=''; $('answer').className='answer empty'; $('answer').textContent='Reading…';
+  await askBlob(small2,true);
+};
+$('fileInput').onchange=onPick; $('shotInput').onchange=onPick;
+})();
+</script>
+</body>
+</html>
