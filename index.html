@@ -68,7 +68,7 @@
   }
   .stage video {
     width: 100%; height: 100%;
-    object-fit: cover;
+    object-fit: contain;
     transform-origin: center;
     display: none;
   }
@@ -145,7 +145,9 @@
       <div class="row">
         <button class="primary" id="startBtn">Start camera</button>
         <button id="stopBtn" disabled>Stop camera</button>
+        <button id="flipBtn" disabled title="Switch between front and back camera">Flip front/back</button>
         <select id="cameraSelect" aria-label="Camera" disabled></select>
+        <button id="screenBtn" title="Use another app or window (for example a Wi-Fi camera app) as the video source">Use screen / window</button>
       </div>
 
       <div class="row">
@@ -247,12 +249,14 @@
     apiKey: $('apiKey'), remember: $('rememberKey'), model: $('model'), prompt: $('prompt'),
     voice: $('voiceSelect'), speakOn: $('speakOn'), autoOn: $('autoOn'), autoSecs: $('autoSecs'),
     history: $('history'), placeholder: $('placeholder'),
-    webOn: $('webOn'), enhance: $('enhance'), rate: $('rate'), rateOut: $('rateOut'), reasoning: $('reasoning')
+    webOn: $('webOn'), flip: $('flipBtn'), screenBtn: $('screenBtn'), enhance: $('enhance'), rate: $('rate'), rateOut: $('rateOut'), reasoning: $('reasoning')
   };
 
   let stream = null, track = null;
   let hwZoom = false;       // true when the camera itself supports zoom
   let zoom = 1;
+  let facing = 'environment';   // 'environment' = back, 'user' = front
+  let mirrored = false;         // preview only; saved photos are never mirrored
   let busy = false;
   let countdown = 0, timerId = null;
   let lastAnswer = '';
@@ -282,7 +286,8 @@
   }
 
   // ---------- Camera ----------
-  async function startCamera(deviceId) {
+  async function startCamera(deviceId, wantFacing) {
+    if (wantFacing) facing = wantFacing;
     stopStream();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatus('This browser cannot access the camera. Open this page over HTTPS or on localhost.', true);
@@ -293,7 +298,7 @@
       frameRate: { ideal: 30 }
     };
     if (deviceId) video_c.deviceId = { exact: deviceId };
-    else video_c.facingMode = { ideal: 'environment' };
+    else video_c.facingMode = { ideal: facing };
 
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: video_c, audio: false });
@@ -302,6 +307,12 @@
       return;
     }
     track = stream.getVideoTracks()[0];
+    const st0 = track.getSettings();
+    let known = false;
+    if (st0.facingMode === 'user' || st0.facingMode === 'environment') { facing = st0.facingMode; known = true; }
+    else if (/front|user|facetime/i.test(track.label || '')) { facing = 'user'; known = true; }
+    else if (/back|rear|environment/i.test(track.label || '')) { facing = 'environment'; known = true; }
+    mirrored = known && facing === 'user';
     video.srcObject = stream;
     await video.play().catch(() => {});
     stage.classList.add('live');
@@ -318,9 +329,39 @@
 
     await listCameras();
     const s = track.getSettings();
-    setStatus(`Camera ready (${s.width}×${s.height}). Take a photo when you like.`);
-    [els.stop, els.capture, els.photoOnly, els.camSel, els.zoomRange, els.zoomIn, els.zoomOut].forEach(b => b.disabled = false);
+    setStatus(`${known ? (facing === 'user' ? 'Front' : 'Back') + ' camera' : 'Camera'} ready (${s.width}×${s.height}). Take a photo when you like.`);
+    [els.stop, els.capture, els.photoOnly, els.camSel, els.flip, els.zoomRange, els.zoomIn, els.zoomOut].forEach(b => b.disabled = false);
     els.start.textContent = 'Restart camera';
+    els.zoomBadge.hidden = false;
+  }
+
+  // Use a shared screen/window (e.g. a Wi-Fi camera app's live view) as the video source.
+  async function startScreen() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      setStatus('Screen sharing is not supported on this browser or device. Use Chrome or Edge on a computer.', true);
+      return;
+    }
+    let s;
+    try {
+      s = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 30 } }, audio: false });
+    } catch (err) {
+      setStatus('Screen sharing was cancelled or blocked: ' + err.message, true);
+      return;
+    }
+    stopStream();
+    stream = s;
+    track = stream.getVideoTracks()[0];
+    track.addEventListener('ended', stopCamera);
+    mirrored = false;
+    video.srcObject = stream;
+    await video.play().catch(() => {});
+    stage.classList.add('live');
+    els.placeholder.style.display = 'none';
+    setupZoom({});
+    const st = track.getSettings();
+    setStatus(`Sharing screen/window (${st.width || '?'}×${st.height || '?'}). Zoom here is digital. Make the camera view fill the shared window for best results.`);
+    [els.stop, els.capture, els.photoOnly, els.zoomRange, els.zoomIn, els.zoomOut].forEach(b => b.disabled = false);
+    els.start.textContent = 'Start camera';
     els.zoomBadge.hidden = false;
   }
 
@@ -334,7 +375,7 @@
     stopStream();
     stage.classList.remove('live');
     els.placeholder.style.display = '';
-    [els.stop, els.capture, els.photoOnly, els.zoomRange, els.zoomIn, els.zoomOut].forEach(b => b.disabled = true);
+    [els.stop, els.capture, els.photoOnly, els.flip, els.zoomRange, els.zoomIn, els.zoomOut].forEach(b => b.disabled = true);
     els.zoomBadge.hidden = true;
     els.autoOn.checked = false;
     updateAuto();
@@ -374,6 +415,13 @@
     setZoom(Number(els.zoomRange.min));
   }
 
+  function applyTransform() {
+    const parts = [];
+    if (mirrored) parts.push('scaleX(-1)');
+    if (!hwZoom && zoom !== 1) parts.push(`scale(${zoom})`);
+    video.style.transform = parts.join(' ');
+  }
+
   async function setZoom(z) {
     const min = Number(els.zoomRange.min), max = Number(els.zoomRange.max);
     zoom = Math.min(max, Math.max(min, z));
@@ -383,10 +431,8 @@
     els.zoomBadge.textContent = label;
     if (hwZoom && track) {
       try { await track.applyConstraints({ advanced: [{ zoom }] }); } catch (e) {}
-      video.style.transform = '';
-    } else {
-      video.style.transform = `scale(${zoom})`;
     }
+    applyTransform();
   }
 
   els.zoomRange.addEventListener('input', () => setZoom(Number(els.zoomRange.value)));
@@ -576,6 +622,15 @@
   els.photoOnly.addEventListener('click', () => { takePhoto(false); });
   els.start.addEventListener('click', () => { primeSpeech(); startCamera(); });
   els.stop.addEventListener('click', stopCamera);
+  els.screenBtn.addEventListener('click', () => { primeSpeech(); startScreen(); });
+  els.flip.addEventListener('click', () => {
+    const next = facing === 'user' ? 'environment' : 'user';
+    startCamera(null, next).then(() => {
+      if (track && track.getSettings().facingMode === (next === 'user' ? 'environment' : 'user')) {
+        setStatus('This device has only one camera facing that way, so it did not switch.', true);
+      }
+    });
+  });
   els.camSel.addEventListener('change', () => startCamera(els.camSel.value));
 
   // ---------- OpenAI ----------
