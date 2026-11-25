@@ -228,6 +228,17 @@
     </section>
 
     <section class="card">
+      <label for="ttsText">Type and speak</label>
+      <textarea id="ttsText" placeholder="Type anything here, then press Speak."></textarea>
+      <div class="row">
+        <button class="primary" id="ttsSpeak">Speak</button>
+        <button id="ttsStop">Stop</button>
+        <button id="ttsClear">Clear</button>
+      </div>
+      <p class="hint">Uses the voice and speaking speed chosen above.</p>
+    </section>
+
+    <section class="card">
       <div class="status">Photos</div>
       <div class="history" id="history"><div class="empty">Photos you take will appear here.</div></div>
     </section>
@@ -800,6 +811,20 @@
   });
   els.speak.addEventListener('click', () => { if (lastAnswer) speak(lastAnswer); });
   els.silence.addEventListener('click', stopSpeaking);
+
+  // ---------- Type and speak ----------
+  const ttsText = $('ttsText');
+  $('ttsSpeak').addEventListener('click', () => {
+    const t = ttsText.value.trim();
+    if (!t) { ttsText.focus(); return; }
+    primeSpeech();
+    speak(t);
+  });
+  $('ttsStop').addEventListener('click', stopSpeaking);
+  $('ttsClear').addEventListener('click', () => { ttsText.value = ''; stopSpeaking(); ttsText.focus(); });
+  ttsText.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); $('ttsSpeak').click(); }
+  });
 
   // ---------- Auto-capture ----------
   function secs() { return Math.max(5, parseInt(els.autoSecs.value, 10) || 30); }
