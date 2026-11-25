@@ -199,6 +199,11 @@
       <select class="field" id="voiceSelect"></select>
 
       <div class="inline">
+        <input type="checkbox" id="enhance" checked>
+        <span>Improve blurry, dark or low-contrast photos before sending</span>
+      </div>
+
+      <div class="inline">
         <input type="checkbox" id="webOn" checked>
         <span>Search the web before answering (more accurate, slower)</span>
       </div>
@@ -242,7 +247,7 @@
     apiKey: $('apiKey'), remember: $('rememberKey'), model: $('model'), prompt: $('prompt'),
     voice: $('voiceSelect'), speakOn: $('speakOn'), autoOn: $('autoOn'), autoSecs: $('autoSecs'),
     history: $('history'), placeholder: $('placeholder'),
-    webOn: $('webOn'), rate: $('rate'), rateOut: $('rateOut'), reasoning: $('reasoning')
+    webOn: $('webOn'), enhance: $('enhance'), rate: $('rate'), rateOut: $('rateOut'), reasoning: $('reasoning')
   };
 
   let stream = null, track = null;
@@ -438,6 +443,96 @@
     });
   }
 
+
+  // ---------- Sharp-frame capture + enhancement ----------
+  function frameToCanvas() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) throw new Error('Camera is not ready yet.');
+    const z = hwZoom ? 1 : zoom;
+    const sw = vw / z, sh = vh / z;
+    const c = document.createElement('canvas');
+    c.width = Math.round(sw); c.height = Math.round(sh);
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, c.width, c.height);
+    return c;
+  }
+  // Variance of the Laplacian: higher = sharper.
+  function sharpness(c) {
+    const w = 480, h = Math.max(8, Math.round(c.height * w / c.width));
+    const t = document.createElement('canvas'); t.width = w; t.height = h;
+    const x = t.getContext('2d', { willReadFrequently: true });
+    x.drawImage(c, 0, 0, w, h);
+    const d = x.getImageData(0, 0, w, h).data;
+    const g = new Float32Array(w * h);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    let sum = 0, sum2 = 0, n = 0;
+    for (let y = 1; y < h - 1; y++) for (let xx = 1; xx < w - 1; xx++) {
+      const i = y * w + xx;
+      const l = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w];
+      sum += l; sum2 += l * l; n++;
+    }
+    const mean = sum / n;
+    return sum2 / n - mean * mean;
+  }
+  // Take several frames in a row and keep the sharpest one.
+  async function grabBest(n = 5) {
+    let best = null, bestScore = -1;
+    for (let k = 0; k < n; k++) {
+      const c = frameToCanvas();
+      const sc = sharpness(c);
+      if (sc > bestScore) { best = c; bestScore = sc; }
+      if (k < n - 1) await new Promise(r => setTimeout(r, 120));
+    }
+    const blob = await new Promise((res, rej) => best.toBlob(b => b ? res(b) : rej(new Error('Could not create image.')), 'image/jpeg', 0.95));
+    return { blob, score: bestScore };
+  }
+  // Auto-contrast + gentle sharpening to help with blur, glare and shadows.
+  function enhanceDataUrl(blob, maxSide = 2048) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(blob);
+      img.onload = () => {
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+        const c = document.createElement('canvas'); c.width = w; c.height = h;
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        const im = ctx.getImageData(0, 0, w, h), d = im.data;
+        // 1st/99th percentile levels
+        const hist = new Uint32Array(256);
+        for (let i = 0; i < d.length; i += 4) hist[(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0]++;
+        const total = w * h; let acc = 0, lo = 0, hi = 255;
+        for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= total * 0.01) { lo = v; break; } }
+        acc = 0;
+        for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= total * 0.01) { hi = v; break; } }
+        if (hi - lo < 40) { lo = 0; hi = 255; }
+        const k = 255 / (hi - lo);
+        const src = new Uint8ClampedArray(d.length);
+        for (let i = 0; i < d.length; i += 4) {
+          src[i] = (d[i] - lo) * k; src[i + 1] = (d[i + 1] - lo) * k; src[i + 2] = (d[i + 2] - lo) * k; src[i + 3] = 255;
+        }
+        // 3x3 sharpen blended 70%
+        const a = 0.7, row = w * 4;
+        for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+          const i = y * row + x * 4;
+          for (let ch = 0; ch < 3; ch++) {
+            const o = src[i + ch];
+            const sharp = 5 * o - src[i - 4 + ch] - src[i + 4 + ch] - src[i - row + ch] - src[i + row + ch];
+            d[i + ch] = o * (1 - a) + sharp * a;
+          }
+          d[i + 3] = 255;
+        }
+        ctx.putImageData(im, 0, 0);
+        resolve(c.toDataURL('image/jpeg', 0.9));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Image enhancement failed.')); };
+      img.src = url;
+    });
+  }
+
   function doFlash() {
     els.flash.classList.add('on');
     setTimeout(() => els.flash.classList.remove('on'), 80);
@@ -465,10 +560,10 @@
     if (busy || !track) return;
     busy = true;
     try {
-      const blob = await grabFrame();
+      const { blob, score } = await grabBest(sendToAI ? 5 : 3);
       doFlash();
       addToHistory(blob);
-      if (sendToAI) await analyze(blob);
+      if (sendToAI) await analyze(blob, score);
       else setStatus('Photo saved. Use “Save” under the thumbnail to download it.');
     } catch (err) {
       setStatus(err.message, true);
@@ -485,12 +580,14 @@
 
   // ---------- OpenAI ----------
   const SOLVER_INSTRUCTIONS =
-    'You are an expert exam solver. The photo contains one or more multiple-choice or single-choice questions. ' +
-    '1) Read the whole question and every option carefully, including small print, numbers, units and negations such as NOT or EXCEPT. ' +
-    '2) Do not trust the first plausible option. Check each option against the question before deciding. ' +
-    '3) For calculations, work step by step. ' +
-    '4) If the question depends on facts, definitions, dates, current events or anything you are not fully sure about, use web search to verify. ' +
-    '5) Keep your notes brief. ' +
+    'You are an expert exam solver. The photo shows one or more multiple-choice or single-choice questions, usually taken by hand with a phone or webcam. ' +
+    'The photo may be tilted, rotated, upside down, taken at an angle, partly blurry, low contrast, or have glare and shadows. ' +
+    'STEP 1 - READ: Mentally straighten and rotate the page, then carefully transcribe the question and every option with its printed label. Zoom in on small text, numbers, units, subscripts and symbols. ' +
+    'Write this as "TRANSCRIPT:" followed by the question and the labelled options. If a word is blurry, use the surrounding context to infer it. ' +
+    'If the question or the options are too unreadable to answer with confidence, do not guess: finish with FINAL: UNCLEAR. ' +
+    'STEP 2 - SOLVE: Read the whole question again, watching for NOT, EXCEPT, LEAST and units. Check every option against the question; do not trust the first plausible one. Work calculations step by step. ' +
+    'If the answer depends on facts, definitions, dates, current events or anything you are not fully sure about, use web search to verify. ' +
+    'Keep your notes brief. ' +
     'Your reply MUST end with one final line in exactly this format: FINAL: <labels>. ' +
     'Use the option labels exactly as printed (A, B, C, D or 1, 2, 3, 4), separated by commas if more than one is correct or if there are several questions (one label per question, in order). ' +
     'Never write the option text after FINAL, only the labels. ' +
@@ -521,7 +618,7 @@
     return { ok: true, data };
   }
 
-  async function analyze(blob) {
+  async function analyze(blob, score) {
     const key = els.apiKey.value.trim();
     if (!key) { setStatus('Enter your OpenAI API key first.', true); return; }
     const webOn = els.webOn.checked;
@@ -531,16 +628,20 @@
     stopSpeaking();
 
     const dataUrl = await blobToResizedDataUrl(blob);
+    const enhanced = els.enhance.checked ? await enhanceDataUrl(blob) : null;
+    const blurry = typeof score === 'number' && score < 25;
+    const content = [
+      { type: 'input_text', text: els.prompt.value || 'Solve the question in this photo.' },
+      { type: 'input_image', image_url: dataUrl, detail: 'high' }
+    ];
+    if (enhanced) {
+      content.push({ type: 'input_text', text: 'The next image is the same photo with enhanced contrast and sharpness, to help you read blurry or low-contrast text.' });
+      content.push({ type: 'input_image', image_url: enhanced, detail: 'high' });
+    }
     const body = {
       model: els.model.value,
       instructions: SOLVER_INSTRUCTIONS,
-      input: [{
-        role: 'user',
-        content: [
-          { type: 'input_text', text: els.prompt.value || 'Solve the question in this photo.' },
-          { type: 'input_image', image_url: dataUrl, detail: 'high' }
-        ]
-      }],
+      input: [{ role: 'user', content }],
       max_output_tokens: 4000
     };
     if (webOn) body.tools = [{ type: 'web_search_preview' }];
@@ -563,6 +664,12 @@
     els.answer.textContent = text || '?';
     if (!text) { setStatus('Could not read a clear answer. Try again with the whole question in frame.', true); return; }
     els.speak.disabled = !text;
+    if (text === 'Unclear') {
+      setStatus('The question was not readable' + (blurry ? ' (photo looks blurry)' : '') + '. Hold the camera steady, fill the frame with the question, and try again.', true);
+      if (els.autoOn.checked) countdown = 5;
+      if (els.speakOn.checked) await speak('Photo unclear. Please retake.');
+      return;
+    }
     setStatus('Answer received at ' + new Date().toLocaleTimeString() + '.');
     if (text && text !== 'None' && els.speakOn.checked) await speak(spokenForm(text));
   }
@@ -573,6 +680,7 @@
     if (!raw) return '';
     let t = raw.replace(/[*_`]/g, '').replace(/^\s*(final|answer|option)\s*[:\-]?\s*/i, '').trim();
     if (/^none\b/i.test(t)) return 'None';
+    if (/^unclear\b/i.test(t)) return 'Unclear';
     const first = /^\(?([A-J]|\d{1,2})\)?(?=[\s,;.):]|$)/;
     const next = /^\s*(?:,|;|&|\band\b)\s*\(?([A-J]|\d{1,2})\)?(?=[\s,;.):]|$)/;
     const labels = [];
