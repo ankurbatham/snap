@@ -167,6 +167,7 @@
     <section class="card">
       <div class="status" id="status">Waiting for a photo.</div>
       <div class="answer" id="answer"></div>
+      <details><summary class="hint">Show how the AI decided</summary><div class="hint" id="reasoning" style="white-space:pre-wrap"></div></details>
       <div class="row">
         <button id="speakBtn" disabled>Speak again</button>
         <button id="silenceBtn">Stop speaking</button>
@@ -185,17 +186,25 @@
 
       <label for="model">Model</label>
       <select class="field" id="model">
-        <option value="gpt-4o">gpt-4o (most accurate)</option>
-        <option value="gpt-4o-mini">gpt-4o-mini (fast, cheap)</option>
-        <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-        <option value="gpt-4.1">gpt-4.1</option>
+        <option value="gpt-4.1">gpt-4.1 (smart + web search)</option>
+        <option value="gpt-4o">gpt-4o (web search)</option>
+        <option value="o4-mini">o4-mini (reasoning, best for maths)</option>
+        <option value="gpt-4.1-mini">gpt-4.1-mini (fast, cheaper)</option>
       </select>
 
       <label for="prompt">What should the AI do with each photo?</label>
-      <textarea id="prompt">Find the multiple-choice or single-choice question in this photo and give the correct option.</textarea>
+      <textarea id="prompt">Solve the question in this photo and give the correct option.</textarea>
 
       <label for="voiceSelect">Voice</label>
       <select class="field" id="voiceSelect"></select>
+
+      <div class="inline">
+        <input type="checkbox" id="webOn" checked>
+        <span>Search the web before answering (more accurate, slower)</span>
+      </div>
+
+      <label for="rate">Speaking speed: <output id="rateOut">1.0×</output></label>
+      <input class="field" type="range" id="rate" min="0.5" max="2" step="0.1" value="1">
 
       <div class="inline">
         <input type="checkbox" id="speakOn" checked>
@@ -232,7 +241,8 @@
     status: $('status'), answer: $('answer'), speak: $('speakBtn'), silence: $('silenceBtn'),
     apiKey: $('apiKey'), remember: $('rememberKey'), model: $('model'), prompt: $('prompt'),
     voice: $('voiceSelect'), speakOn: $('speakOn'), autoOn: $('autoOn'), autoSecs: $('autoSecs'),
-    history: $('history'), placeholder: $('placeholder')
+    history: $('history'), placeholder: $('placeholder'),
+    webOn: $('webOn'), rate: $('rate'), rateOut: $('rateOut'), reasoning: $('reasoning')
   };
 
   let stream = null, track = null;
@@ -474,53 +484,80 @@
   els.camSel.addEventListener('change', () => startCamera(els.camSel.value));
 
   // ---------- OpenAI ----------
-  async function analyze(blob) {
-    const key = els.apiKey.value.trim();
-    if (!key) { setStatus('Enter your OpenAI API key first.', true); return; }
-    setStatus('Sending photo to OpenAI…');
-    els.answer.textContent = '';
-    stopSpeaking();
+  const SOLVER_INSTRUCTIONS =
+    'You are an expert exam solver. The photo contains one or more multiple-choice or single-choice questions. ' +
+    '1) Read the whole question and every option carefully, including small print, numbers, units and negations such as NOT or EXCEPT. ' +
+    '2) Do not trust the first plausible option. Check each option against the question before deciding. ' +
+    '3) For calculations, work step by step. ' +
+    '4) If the question depends on facts, definitions, dates, current events or anything you are not fully sure about, use web search to verify. ' +
+    '5) Keep your notes brief. ' +
+    'Your reply MUST end with one final line in exactly this format: FINAL: <labels>. ' +
+    'Use the option labels exactly as printed (A, B, C, D or 1, 2, 3, 4), separated by commas if more than one is correct or if there are several questions (one label per question, in order). ' +
+    'If no question is visible, write FINAL: NONE.';
 
-    const dataUrl = await blobToResizedDataUrl(blob);
-    const body = {
-      model: els.model.value,
-      max_tokens: 20,
-      temperature: 0,
-      messages: [
-        { role: 'system', content:
-          'You solve multiple-choice and single-choice questions shown in a photo. ' +
-          'Work out the correct option silently, then output ONLY the option label exactly as printed: ' +
-          'a letter (A, B, C, D) or a number (1, 2, 3, 4). ' +
-          'If more than one option is correct, output the labels separated by commas, like "A, C". ' +
-          'Never output explanations, words, punctuation other than commas, or the option text. ' +
-          'If the photo has several questions, output one label per question in order, separated by commas. ' +
-          'If no question is visible, output exactly: NONE.' },
-        { role: 'user', content: [
-          { type: 'text', text: els.prompt.value || 'Describe this photo.' },
-          { type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }
-        ] }
-      ]
-    };
+  function extractText(data) {
+    if (data.output_text) return data.output_text;
+    let t = '';
+    (data.output || []).forEach(o => {
+      if (o.type === 'message') (o.content || []).forEach(c => { if (c.type === 'output_text') t += c.text; });
+    });
+    return t.trim();
+  }
 
+  async function callResponses(key, body) {
     let res;
     try {
-      res = await fetch('https://api.openai.com/v1/chat/completions', {
+      res = await fetch('https://api.openai.com/v1/responses', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
         body: JSON.stringify(body)
       });
     } catch (e) {
-      setStatus('Network error reaching OpenAI. Check your connection.', true);
-      return;
+      return { ok: false, error: 'Network error reaching OpenAI. Check your connection.' };
     }
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const msg = (data.error && data.error.message) || ('HTTP ' + res.status);
-      setStatus('OpenAI error: ' + msg, true);
-      return;
+    if (!res.ok) return { ok: false, error: (data.error && data.error.message) || ('HTTP ' + res.status) };
+    return { ok: true, data };
+  }
+
+  async function analyze(blob) {
+    const key = els.apiKey.value.trim();
+    if (!key) { setStatus('Enter your OpenAI API key first.', true); return; }
+    const webOn = els.webOn.checked;
+    setStatus(webOn ? 'Reading the question and checking the web… (this can take 10–30 seconds)' : 'Reading and solving the question…');
+    els.answer.textContent = '…';
+    els.reasoning.textContent = '';
+    stopSpeaking();
+
+    const dataUrl = await blobToResizedDataUrl(blob);
+    const body = {
+      model: els.model.value,
+      instructions: SOLVER_INSTRUCTIONS,
+      input: [{
+        role: 'user',
+        content: [
+          { type: 'input_text', text: els.prompt.value || 'Solve the question in this photo.' },
+          { type: 'input_image', image_url: dataUrl, detail: 'high' }
+        ]
+      }],
+      max_output_tokens: 4000
+    };
+    if (webOn) body.tools = [{ type: 'web_search_preview' }];
+
+    let r = await callResponses(key, body);
+    if (!r.ok && webOn && /tool|search/i.test(r.error)) {
+      // This model may not support web search: retry without it.
+      delete body.tools;
+      setStatus('Web search is not available for this model. Solving without it…');
+      r = await callResponses(key, body);
     }
-    const raw = (data.choices && data.choices[0] && data.choices[0].message.content || '').trim();
-    const text = cleanAnswer(raw);
+    if (!r.ok) { els.answer.textContent = ''; setStatus('OpenAI error: ' + r.error, true); return; }
+
+    const full = extractText(r.data);
+    els.reasoning.textContent = full;
+    const matches = [...full.matchAll(/FINAL:\s*(.+)/gi)];
+    const finalPart = matches.length ? matches[matches.length - 1][1] : full.trim().split('\n').pop();
+    const text = cleanAnswer(finalPart.trim());
     lastAnswer = text;
     els.answer.textContent = text || '?';
     els.speak.disabled = !text;
@@ -574,6 +611,7 @@
       if (!synth) { setStatus('Speech is not supported in this browser.', true); return resolve(); }
       synth.cancel();
       const u = new SpeechSynthesisUtterance(text);
+      u.rate = Number(els.rate.value) || 1;
       const v = synth.getVoices().find(x => x.name === els.voice.value);
       if (v) { u.voice = v; u.lang = v.lang; }
       u.onend = u.onerror = () => resolve();
@@ -581,6 +619,12 @@
     });
   }
   function stopSpeaking() { if (synth) synth.cancel(); }
+  try { const r0 = localStorage.getItem('cam_ai_rate'); if (r0) els.rate.value = r0; } catch (e) {}
+  els.rateOut.textContent = Number(els.rate.value).toFixed(1) + '×';
+  els.rate.addEventListener('input', () => {
+    els.rateOut.textContent = Number(els.rate.value).toFixed(1) + '×';
+    try { localStorage.setItem('cam_ai_rate', els.rate.value); } catch (e) {}
+  });
   els.speak.addEventListener('click', () => { if (lastAnswer) speak(lastAnswer); });
   els.silence.addEventListener('click', stopSpeaking);
 
