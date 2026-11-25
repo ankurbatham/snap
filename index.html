@@ -493,6 +493,7 @@
     '5) Keep your notes brief. ' +
     'Your reply MUST end with one final line in exactly this format: FINAL: <labels>. ' +
     'Use the option labels exactly as printed (A, B, C, D or 1, 2, 3, 4), separated by commas if more than one is correct or if there are several questions (one label per question, in order). ' +
+    'Never write the option text after FINAL, only the labels. ' +
     'If no question is visible, write FINAL: NONE.';
 
   function extractText(data) {
@@ -560,6 +561,7 @@
     const text = cleanAnswer(finalPart.trim());
     lastAnswer = text;
     els.answer.textContent = text || '?';
+    if (!text) { setStatus('Could not read a clear answer. Try again with the whole question in frame.', true); return; }
     els.speak.disabled = !text;
     setStatus('Answer received at ' + new Date().toLocaleTimeString() + '.');
     if (text && text !== 'None' && els.speakOn.checked) await speak(spokenForm(text));
@@ -569,10 +571,18 @@
   // Keep only option labels (A-J or 1-20), even if the model adds extra words.
   function cleanAnswer(raw) {
     if (!raw) return '';
-    if (/^\W*none\W*$/i.test(raw)) return 'None';
-    const stripped = raw.replace(/answer|option|correct|is|the/gi, ' ');
-    const labels = stripped.match(/\b(?:[A-J]|\d{1,2})\b/g);
-    return labels ? labels.join(', ') : raw.slice(0, 20);
+    let t = raw.replace(/[*_`]/g, '').replace(/^\s*(final|answer|option)\s*[:\-]?\s*/i, '').trim();
+    if (/^none\b/i.test(t)) return 'None';
+    const first = /^\(?([A-J]|\d{1,2})\)?(?=[\s,;.):]|$)/;
+    const next = /^\s*(?:,|;|&|\band\b)\s*\(?([A-J]|\d{1,2})\)?(?=[\s,;.):]|$)/;
+    const labels = [];
+    let m = first.exec(t);
+    while (m) {
+      labels.push(m[1]);
+      t = t.slice(m[0].length);
+      m = next.exec(t);
+    }
+    return labels.join(', '); // anything after the labels (option text) is ignored
   }
   function spokenForm(text) {
     return 'Answer: ' + text.replace(/,/g, ', ');
